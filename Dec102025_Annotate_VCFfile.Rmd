@@ -1,0 +1,196 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+# How to annotate a VCF with GTF file
+
+This notebook containes examples of how someone would take a VCF file that contains variants from a patient or a cohort of patients and annotate the file with genes and/or all isoforms.
+
+## Load library
+
+```{r}
+# Load necessary libraries for data manipulation and visualization
+library(tidyr)          # Functions for creating tidy data
+library(purrr)          # Make functional programming easier and more accessible in R
+library(dplyr)          # Data wrangling
+library(stringr)        # String manipulation
+library(ggplot2)        # Graphs
+library(forcats)        # Factors manipulation
+#library(Cairo)          # Creates high quality PDFs for publication
+library(GenomicRanges)  # Genomic ranges for overlapping genes
+library(biomaRt)        # Gene annotations
+library(networkD3)      # Network diagrams, i.e., Sankey plot
+library(data.table)     # Data manipulation
+library(rtracklayer)    # GTF file handling
+library(circlize)       # Circos plots
+library(rmdformats)     # RMarkdown formatting
+library(knitr)          # For creating tables in R Markdown
+library(skimr)          # For detailed summaries
+library(kableExtra)     # For table styling
+library(tibble)         # For adding rows to tibbles/data frames
+library(readr)          # Efficient data import and export
+library(R.utils)        # Provides gzip compression utilities
+library(htmlwidgets)    # Saves plot as HTML
+library(webshot2)       # Captures HTML file as PDF
+library(chromote)       # Headless Chrome Remote Interface
+library(here)           # File path management
+library(vcfR)           # Reads VCF files
+
+# Define a custom option to control chunk evaluation
+options(eval_chunks = TRUE)
+
+# Set the global chunk option based on the custom option
+knitr::opts_chunk$set(
+  eval = getOption("eval_chunks"),
+  fig.width = 12,
+  fig.height = 8,
+  out.width = '80%',
+  fig.align = 'center',
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+
+## Download GTF File
+Another option:
+https://hgdownload.gi.ucsc.edu/goldenPath/hg38/bigZips/genes/hg38.ensGene.gtf.gz
+
+```{r}
+# Specify the data directory and file path
+dir_path <- "PublicData"
+
+# Merged GTF file from RefSeq
+gtf_file <- file.path(dir_path, "MANE.GRCh38.v1.5.refseq_genomic.gtf.gz")
+gtf_url <- "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/MANE.GRCh38.v1.5.refseq_genomic.gtf.gz"
+
+# Create the directory if it does not exist
+if (!dir.exists(dir_path)) {
+  dir.create(dir_path, recursive = TRUE)
+  cat("Directory created.\n")
+}
+
+# Check if the GTF file is available locally; if not, download it
+if (!file.exists(gtf_file)) {
+  download.file(gtf_url, destfile = gtf_file)
+  cat("GTF file downloaded.\n")
+}
+
+# Import the GTF file
+if (!exists("gtf")) {
+  tryCatch({
+    gtf <- import(gtf_file, format = "gtf")
+    cat("GTF file successfully imported.\n")
+  }, error = function(e) {
+    cat("An error occurred while importing the GTF file:\n", e$message, "\n")
+  })
+} else {
+  cat("GTF file already loaded.\n")
+}
+```
+
+```{r}
+# Specify the data directory and file path
+dir_path <- "PublicData"
+
+# Merged GTF file from RefSeq
+gtf_file <- file.path(dir_path, "hg38.ensGene.gtf.gz")
+gtf_url <- "https://hgdownload.gi.ucsc.edu/goldenPath/hg38/bigZips/genes/hg38.ensGene.gtf.gz"
+
+# Create the directory if it does not exist
+if (!dir.exists(dir_path)) {
+  dir.create(dir_path, recursive = TRUE)
+  cat("Directory created.\n")
+}
+
+# Check if the GTF file is available locally; if not, download it
+if (!file.exists(gtf_file)) {
+  download.file(gtf_url, destfile = gtf_file)
+  cat("GTF file downloaded.\n")
+}
+
+# Import the GTF file
+if (!exists("gtf")) {
+  tryCatch({
+    gtf <- import(gtf_file, format = "gtf")
+    cat("GTF file successfully imported.\n")
+  }, error = function(e) {
+    cat("An error occurred while importing the GTF file:\n", e$message, "\n")
+  })
+} else {
+  cat("GTF file already loaded.\n")
+}
+```
+
+
+We will use the genotype of TSI population - Tuscans from Italy - genotypes
+
+> "The 1000 Genomes Project Consortium. A global reference for human genetic variation. Nature 526, 68–74 (2015). https://doi.org/10.1038/nature15393"
+
+I am providing you with a small VCF file from the 1000 genomes, it originates from here:
+https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/pilot_data/paper_data_sets/a_map_of_human_variation/exon/snps/
+
+#### FROM THE READ_ME FILE
+
+1000 Genomes Project Pilot 3
+March 2010 SNP call release 
+
+Samples
+-------
+
+697 total samples from 7 populations
+
+              CEU: 90 samples
+              TSI: 66 samples
+              CHB: 109 samples
+              CHD: 107 samples
+              JPT: 105 samples
+              LWK: 108 samples
+              YRI: 112 samples
+
+ 
+
+Targets
+-------
+
+Initial target selection targeted ~1,000 genes (~10,000 exons or 2.3Mb), using CCDS annotations. The current data release only includes SNP calls that fell into regions 
+that were successfully captured by all four data producing centers. The number of these regions is ~8496 , of total target length of ~1.43Mb.
+
+Sequence data
+--------------
+
+Samples were sequenced with two sequencing technologies (454 at BCM, and Illumina at BI, WTSI, WUGSC). Overall average per-sample coverage ranges from 30-60X 
+per-population.
+
+
+# Load the VCF file
+
+```{R}
+TSI_1KGP <- read.vcfR("TSI.exon.2010_09.genotypes.vcf.gz")
+```
+So, this file is GRCh37, it's nice to note to ensure the gtf file matches the genome version.
+```{r}
+strwrap(TSI_1KGP@meta[1:16])
+```
+
+```{r}
+queryMETA(TSI_1KGP)
+```
+
+
+```{r}
+head(getFIX(TSI_1KGP))
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
